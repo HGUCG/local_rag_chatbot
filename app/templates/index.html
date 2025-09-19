@@ -33,75 +33,192 @@
     const messages = document.getElementById('messages');
     const form = document.getElementById('form');
     const input = document.getElementById('input');
+    const sendButton = form.querySelector('button[type="submit"]');
+    const conversation = [];
+    const MAX_HISTORY = 20;
 
-    function addMessage(role, content) {
-      const div = document.createElement('div');
-      div.className = 'msg ' + role;
-      div.textContent = content;
-      messages.appendChild(div);
+    function scrollToBottom() {
       messages.scrollTop = messages.scrollHeight;
     }
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
-      addMessage('user', text);
-      input.value = '';
-
-      try {
-        const resp = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, history: [] }),
-        });
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status}`);
-        }
-        const data = await resp.json();
-        const answer = data.answer || '';
-        const cites = Array.isArray(data.citations) ? data.citations : [];
-        let citeText = '';
-        if (cites.length) {
-          const citeLines = cites.map((c, i) => {
-            const parts = [`[${i + 1}] ${c.source_name || 'Quelle'}`];
-            if (typeof c.page === 'number') {
-              parts.push(`Seite ${c.page}`);
-            }
-            if (typeof c.score === 'number' && !Number.isNaN(c.score)) {
-              parts.push(`Score: ${Number(c.score).toFixed(2)}`);
-            }
-            return parts.join(' | ');
-          }).join('\n');
-          citeText = `\n\nQuellen:\n${citeLines}`;
-        }
-        addMessage('assistant', answer + citeText);
-      } catch (err) {
-        console.error(err);
-        addMessage('assistant', 'Es ist ein Fehler beim Abrufen der Antwort aufgetreten. Siehe Konsole für Details.');
+    function trimHistory() {
+      while (conversation.length > MAX_HISTORY) {
+        conversation.shift();
       }
+    }
+
+    function createMessageElement(role, content) {
+      const entry = document.createElement('div');
+      entry.className = 'msg ' + role;
+
+      const textBlock = document.createElement('div');
+      textBlock.className = 'msg-text';
+      textBlock.textContent = content;
+      entry.appendChild(textBlock);
+
+      if (role === 'assistant') {
+        const citeList = document.createElement('ol');
+        citeList.className = 'citations';
+        citeList.style.display = 'none';
+        entry.appendChild(citeList);
+      }
+
+      messages.appendChild(entry);
+      scrollToBottom();
+      return entry;
+    }
+
+    function updateAssistantMessage(entry, text, citations) {
+      const textBlock = entry.querySelector('.msg-text');
+      if (textBlock) {
+        textBlock.textContent = text;
+      }
+      const citeList = entry.querySelector('.citations');
+      if (!citeList) {
+        return;
+      }
+      citeList.innerHTML = '';
+      if (!Array.isArray(citations) || !citations.length) {
+        citeList.style.display = 'none';
+        return;
+      }
+
+      citations.forEach((c, index) => {
+        const li = document.createElement('li');
+        const parts = [`[${index + 1}] ${c && c.source_name ? c.source_name : 'Quelle'}`];
+        if (c && typeof c.page === 'number') {
+          parts.push(`Seite ${c.page}`);
+        }
+        if (c && typeof c.score === 'number' && !Number.isNaN(c.score)) {
+          parts.push(`Score ${Number(c.score).toFixed(2)}`);
+        }
+        li.textContent = parts.join(' • ');
+        citeList.appendChild(li);
+      });
+      citeList.style.display = '';
+    }
+
+    function setUiBusy(busy) {
+      input.disabled = busy;
+      sendButton.disabled = busy;
+      form.classList.toggle('busy', busy);
+    }
+
+    function postJson(url, payload) {
+      const body = JSON.stringify(payload !== undefined ? payload : {});
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      };
+
+      if (window.fetch) {
+        return fetch(url, {
+          method: 'POST',
+          headers,
+          body,
+        }).then((resp) => {
+          if (!resp.ok) {
+            return resp.text().then((text) => {
+              const err = new Error(`HTTP ${resp.status}${text ? ` – ${text}` : ''}`);
+              err.status = resp.status;
+              throw err;
+            });
+          }
+          return resp.json();
+        });
+      }
+
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        Object.keys(headers).forEach((key) => {
+          xhr.setRequestHeader(key, headers[key]);
+        });
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== 4) {
+            return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const data = JSON.parse(xhr.responseText || '{}');
+              resolve(data);
+            } catch (parseErr) {
+              reject(parseErr);
+            }
+          } else {
+            reject(new Error(`HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error('Netzwerkfehler'));
+        xhr.send(body);
+      });
+    }
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const text = input.value.trim();
+      if (!text) {
+        return;
+      }
+
+      input.value = '';
+      createMessageElement('user', text);
+
+      conversation.push({ role: 'user', content: text });
+      trimHistory();
+
+      const assistantEntry = createMessageElement('assistant', '…');
+      assistantEntry.classList.add('pending');
+
+      const historyPayload = conversation.slice(0, Math.max(conversation.length - 1, 0));
+
+      setUiBusy(true);
+
+      postJson('/api/chat', { message: text, history: historyPayload })
+        .then((data) => {
+          const answer = typeof data.answer === 'string' && data.answer.trim()
+            ? data.answer
+            : 'Keine Antwort erhalten.';
+          const citations = Array.isArray(data.citations) ? data.citations : [];
+          updateAssistantMessage(assistantEntry, answer, citations);
+          assistantEntry.classList.remove('pending');
+          conversation.push({ role: 'assistant', content: answer });
+          trimHistory();
+        })
+        .catch((err) => {
+          console.error(err);
+          const message = 'Fehler beim Abrufen der Antwort: ' + (err && err.message ? err.message : err);
+          updateAssistantMessage(assistantEntry, message, []);
+          assistantEntry.classList.remove('pending');
+          assistantEntry.classList.add('error');
+        })
+        .finally(() => {
+          setUiBusy(false);
+          input.focus();
+        });
     });
 
     const reindexButton = document.getElementById('reindex');
     const reindexStatus = document.getElementById('reindex-status');
-    reindexButton.addEventListener('click', async () => {
+    reindexButton.addEventListener('click', () => {
       reindexButton.disabled = true;
       reindexStatus.textContent = '… läuft';
-      try {
-        const resp = await fetch('/api/reindex', { method: 'POST' });
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status}`);
-        }
-        const data = await resp.json();
-        const total = typeof data.indexed_chunks === 'number' ? data.indexed_chunks : '–';
-        reindexStatus.textContent = `OK – ${total} Chunks`;
-      } catch (err) {
-        console.error(err);
-        reindexStatus.textContent = 'Fehler beim Reindex – siehe Konsole';
-      } finally {
-        reindexButton.disabled = false;
-      }
+
+      postJson('/api/reindex', {})
+        .then((data) => {
+          const total = typeof data.indexed_chunks === 'number' ? data.indexed_chunks : '–';
+          reindexStatus.textContent = `OK – ${total} Chunks`;
+        })
+        .catch((err) => {
+          console.error(err);
+          reindexStatus.textContent = 'Fehler beim Reindex – ' + (err && err.message ? err.message : err);
+        })
+        .finally(() => {
+          reindexButton.disabled = false;
+        });
     });
+
+    input.focus();
   </script>
 </body>
 </html>
