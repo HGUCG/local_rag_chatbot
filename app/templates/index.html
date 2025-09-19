@@ -1,0 +1,79 @@
+
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lokaler RAG-Chatbot</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>Lokaler RAG-Chatbot</h1>
+    <p class="muted">Frage stellen – Antworten aus deinen lokalen Dateien mit Quellen.</p>
+
+    <div id="chat">
+      <div id="messages"></div>
+      <form id="form">
+        <input type="text" id="input" placeholder="Frag etwas…" autocomplete="off" />
+        <button type="submit">Senden</button>
+      </form>
+    </div>
+
+    <details>
+      <summary>Index neu bauen</summary>
+      <button id="reindex">Reindex starten</button>
+      <span id="reindex-status"></span>
+    </details>
+
+    <p class="footnote">Optionales LLM via Ollama über Umgebungsvariable <code>OLLAMA_MODEL</code>.</p>
+  </div>
+
+  <script>
+    const messages = document.getElementById('messages');
+    const form = document.getElementById('form');
+    const input = document.getElementById('input');
+
+    function addMessage(role, content) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + role;
+      div.textContent = content;
+      messages.appendChild(div);
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      addMessage('user', text);
+      input.value = '';
+
+      const resp = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, history: [] }),
+      });
+      const data = await resp.json();
+      const answer = data.answer || '';
+      const cites = data.citations || [];
+      let citeText = '';
+      if (cites.length) {
+        citeText = '
+
+Quellen:
+' + cites.map((c, i) => ` [${i+1}] ${c.source_name} (Score: ${c.score.toFixed(2)})`).join('
+');
+      }
+      addMessage('assistant', answer + citeText);
+    });
+
+    document.getElementById('reindex').addEventListener('click', async () => {
+      document.getElementById('reindex-status').textContent = '… läuft';
+      const resp = await fetch('/api/reindex', { method: 'POST' });
+      const data = await resp.json();
+      document.getElementById('reindex-status').textContent = `OK – ${data.indexed_chunks} Chunks`;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+
+Willkommen in deinem lokalen Wissensspeicher.
+
+Dieser Ordner enthält Beispieltexte, die vom Chatbot durchsucht werden.
+Füge eigene Dateien hinzu (TXT, MD, PDF, DOCX), starte den Reindex, und stelle Fragen!
