@@ -49,30 +49,58 @@
       addMessage('user', text);
       input.value = '';
 
-      const resp = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history: [] }),
-      });
-      const data = await resp.json();
-      const answer = data.answer || '';
-      const cites = data.citations || [];
-      let citeText = '';
-      if (cites.length) {
-        citeText = '
-
-Quellen:
-' + cites.map((c, i) => ` [${i+1}] ${c.source_name} (Score: ${c.score.toFixed(2)})`).join('
-');
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, history: [] }),
+        });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        const answer = data.answer || '';
+        const cites = Array.isArray(data.citations) ? data.citations : [];
+        let citeText = '';
+        if (cites.length) {
+          const citeLines = cites.map((c, i) => {
+            const parts = [`[${i + 1}] ${c.source_name || 'Quelle'}`];
+            if (typeof c.page === 'number') {
+              parts.push(`Seite ${c.page}`);
+            }
+            if (typeof c.score === 'number' && !Number.isNaN(c.score)) {
+              parts.push(`Score: ${Number(c.score).toFixed(2)}`);
+            }
+            return parts.join(' | ');
+          }).join('\n');
+          citeText = `\n\nQuellen:\n${citeLines}`;
+        }
+        addMessage('assistant', answer + citeText);
+      } catch (err) {
+        console.error(err);
+        addMessage('assistant', 'Es ist ein Fehler beim Abrufen der Antwort aufgetreten. Siehe Konsole für Details.');
       }
-      addMessage('assistant', answer + citeText);
     });
 
-    document.getElementById('reindex').addEventListener('click', async () => {
-      document.getElementById('reindex-status').textContent = '… läuft';
-      const resp = await fetch('/api/reindex', { method: 'POST' });
-      const data = await resp.json();
-      document.getElementById('reindex-status').textContent = `OK – ${data.indexed_chunks} Chunks`;
+    const reindexButton = document.getElementById('reindex');
+    const reindexStatus = document.getElementById('reindex-status');
+    reindexButton.addEventListener('click', async () => {
+      reindexButton.disabled = true;
+      reindexStatus.textContent = '… läuft';
+      try {
+        const resp = await fetch('/api/reindex', { method: 'POST' });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        const total = typeof data.indexed_chunks === 'number' ? data.indexed_chunks : '–';
+        reindexStatus.textContent = `OK – ${total} Chunks`;
+      } catch (err) {
+        console.error(err);
+        reindexStatus.textContent = 'Fehler beim Reindex – siehe Konsole';
+      } finally {
+        reindexButton.disabled = false;
+      }
     });
   </script>
 </body>
