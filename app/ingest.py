@@ -1,127 +1,222 @@
-
 import argparse
 import json
 import os
 import re
 from pathlib import Path
-from typing import List, Dict
+from typing import Iterable, List, Optional, Tuple
 
-from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document
-
-# Einfache Satz- und Token-Funktionen ohne NLTK
-_SENT_SPLIT = re.compile(r'(?<=[.!?])\s+(?=[A-ZÄÖÜ0-9])')
-_WORD_SPLIT = re.compile(r"[^a-zA-Z0-9äöüÄÖÜß]+")
+from pdfminer.high_level import extract_pages, extract_text as pdf_extract_text
+from pdfminer.layout import LTTextContainer
 
 
-def read_text_file(p: Path) -> str:
-    try:
-        return p.read_text(encoding='utf-8')
-    except UnicodeDecodeError:
-        return p.read_text(encoding='latin-1', errors='ignore')
+PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
+SINGLE_NEWLINE_RE = re.compile(r"(?<!\n)\n(?!\n)")
+WHITESPACE_RE = re.compile(r"[ \t\f\v]+")
 
 
-def read_pdf_file(p: Path) -> str:
-    try:
-        return pdf_extract_text(str(p))
-    except Exception as e:
+def normalize_text(text: str) -> str:
+    """Collapse whitespace, remove soft hyphenation and join short lines."""
+
+    if not text:
         return ""
 
+    text = text.replace("\ufeff", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00ad", "")  # soft hyphen
+    text = re.sub(r"-\s*\n", "", text)  # unwrap hyphenated line breaks
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = WHITESPACE_RE.sub(" ", text)
+    text = SINGLE_NEWLINE_RE.sub(" ", text)
+    paragraphs = [p.strip() for p in PARAGRAPH_SPLIT_RE.split(text) if p.strip()]
+    if not paragraphs:
+        return text.strip()
+    return "\n\n".join(paragraphs)
 
-def read_docx_file(p: Path) -> str:
+
+def read_text_file(path: Path) -> str:
     try:
-        doc = Document(str(p))
-        return "
-".join([para.text for para in doc.paragraphs])
+        raw = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raw = path.read_text(encoding="latin-1", errors="ignore")
+    return normalize_text(raw)
+
+
+def read_docx_file(path: Path) -> str:
+    try:
+        document = Document(str(path))
     except Exception:
         return ""
+    text = "\n".join(para.text for para in document.paragraphs)
+    return normalize_text(text)
 
 
-def split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
-    # Paragraphen-orientiert, fallback auf sliding window
-    paragraphs = [t.strip() for t in re.split(r"
-\s*
-+", text) if t.strip()]
+def read_pdf_file(path: Path) -> List[Tuple[Optional[int], str]]:
+    pages: List[Tuple[Optional[int], str]] = []
+    try:
+        for page_number, layout in enumerate(extract_pages(str(path)), start=1):
+            segments: List[str] = []
+            for element in layout:
+                if isinstance(element, LTTextContainer):
+                    segments.append(element.get_text())
+            page_text = normalize_text("\n".join(segments))
+            if page_text:
+                pages.append((page_number, page_text))
+    except Exception:
+        pages = []
+
+    if pages:
+        return pages
+
+    # Fallback: best-effort plain text extraction if layout parsing fails
+    try:
+        fallback_text = normalize_text(pdf_extract_text(str(path)))
+    except Exception:
+        fallback_text = ""
+    return [(None, fallback_text)] if fallback_text else []
+
+
+def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    if not text:
+        return []
+
+    text = text.strip()
+    if not text:
+        return []
+
     chunks: List[str] = []
-    for para in paragraphs:
-        if len(para) <= chunk_size:
-            chunks.append(para)
+    total_length = len(text)
+    start = 0
+    previous_start = -1
+
+    while start < total_length and start != previous_start:
+        previous_start = start
+        end = min(start + chunk_size, total_length)
+
+        if end < total_length:
+            split = _find_split_position(text, start, end)
+            if split is not None and split > start:
+                end = split
+
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        if end >= total_length:
+            break
+
+        if overlap >= chunk_size:
+            next_start = end
         else:
-            start = 0
-            while start < len(para):
-                end = min(start + chunk_size, len(para))
-                chunks.append(para[start:end])
-                if end == len(para):
-                    break
-                start = max(end - overlap, 0)
+            next_start = max(end - overlap, 0)
+
+        while next_start > start and next_start > 0 and not text[next_start - 1].isspace():
+            next_start -= 1
+        while next_start < total_length and text[next_start].isspace():
+            next_start += 1
+
+        if next_start <= start:
+            next_start = end
+
+        start = next_start
+
     return chunks
 
 
-def detect_pages_for_pdf(text: str) -> List[int]:
-    # pdfminer liefert Fließtext; ohne Layout nehmen wir Seite unbekannt => -1
+def _find_split_position(text: str, start: int, end: int) -> Optional[int]:
+    window = text[start:end]
+    patterns: Iterable[Tuple[str, int]] = [
+        ("\n\n", 0),
+        (". ", 1),
+        ("? ", 1),
+        ("! ", 1),
+        ("\n", 0),
+        (" ", 0),
+    ]
+
+    for pattern, offset in patterns:
+        idx = window.rfind(pattern)
+        if idx > 0:
+            return start + idx + offset
+    return None
+
+
+def split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
+    normalized = normalize_text(text)
+    return chunk_text(normalized, chunk_size, overlap)
+
+
+def load_sections(path: Path) -> List[Tuple[Optional[int], str]]:
+    extension = path.suffix.lower()
+    if extension in {".txt", ".md"}:
+        text = read_text_file(path)
+        return [(None, text)] if text else []
+    if extension == ".docx":
+        text = read_docx_file(path)
+        return [(None, text)] if text else []
+    if extension == ".pdf":
+        return read_pdf_file(path)
     return []
 
 
 def ingest(data_dir: str, index_path: str, chunk_size: int = 800, overlap: int = 120) -> int:
-    root = Path(data_dir)
-    idx_path = Path(index_path)
-    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    data_root = Path(data_dir)
+    index_file = Path(index_path)
+    index_file.parent.mkdir(parents=True, exist_ok=True)
 
-    supported = {'.txt', '.md', '.pdf', '.docx'}
-    count = 0
-    with open(idx_path, 'w', encoding='utf-8') as out:
-        for p in root.rglob('*'):
-            if not p.is_file():
-                continue
-            ext = p.suffix.lower()
-            if ext not in supported:
-                continue
+    tmp_path = (
+        index_file.with_suffix(index_file.suffix + ".tmp")
+        if index_file.suffix
+        else index_file.with_name(index_file.name + ".tmp")
+    )
+    if tmp_path.exists():
+        tmp_path.unlink()
 
-            if ext in {'.txt', '.md'}:
-                text = read_text_file(p)
-                page_info = None
-            elif ext == '.pdf':
-                text = read_pdf_file(p)
-                page_info = None  # Unknown page mapping
-            elif ext == '.docx':
-                text = read_docx_file(p)
-                page_info = None
-            else:
+    chunk_count = 0
+
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for path in sorted(data_root.rglob("*")):
+            if not path.is_file():
                 continue
 
-            if not text or not text.strip():
+            sections = load_sections(path)
+            if not sections:
                 continue
 
-            chunks = split_into_chunks(text, chunk_size, overlap)
-            for i, ch in enumerate(chunks):
-                rec = {
-                    'id': f"{p.name}:{i}",
-                    'text': ch,
-                    'source_path': str(p),
-                    'source_name': p.name,
-                    'page': page_info if page_info is not None else None,
-                    'chunk_idx': i,
-                }
-                out.write(json.dumps(rec, ensure_ascii=False) + "
-")
-                count += 1
-    return count
+            chunk_idx = 0
+            for page_info, section_text in sections:
+                for chunk in split_into_chunks(section_text, chunk_size, overlap):
+                    record = {
+                        "id": f"{path.name}:{chunk_idx}",
+                        "text": chunk,
+                        "source_path": str(path),
+                        "source_name": path.name,
+                        "page": page_info,
+                        "chunk_idx": chunk_idx,
+                    }
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    chunk_count += 1
+                    chunk_idx += 1
+
+    tmp_path.replace(index_file)
+    return chunk_count
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--data-dir', default='data')
-    ap.add_argument('--index-path', default='index.jsonl')
-    ap.add_argument('--chunk-size', type=int, default=800)
-    ap.add_argument('--overlap', type=int, default=120)
-    ap.add_argument('--reset', action='store_true')
-    args = ap.parse_args()
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--index-path", default="index.jsonl")
+    parser.add_argument("--chunk-size", type=int, default=800)
+    parser.add_argument("--overlap", type=int, default=120)
+    parser.add_argument("--reset", action="store_true")
+    args = parser.parse_args()
 
     if args.reset and os.path.exists(args.index_path):
         os.remove(args.index_path)
 
-    n = ingest(args.data_dir, args.index_path, args.chunk_size, args.overlap)
-    print(f"Index erstellt: {n} Chunks -> {args.index_path}")
+    total = ingest(args.data_dir, args.index_path, args.chunk_size, args.overlap)
+    print(f"Index erstellt: {total} Chunks -> {args.index_path}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

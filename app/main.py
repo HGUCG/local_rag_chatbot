@@ -1,9 +1,20 @@
+from pathlib import Path
+import sys
+
+# Allow running this module directly (e.g. ``python app/main.py``) by ensuring
+# the repository root is on ``sys.path`` so ``import app`` works even when
+# Python sets ``__package__`` to ``None``.
+if __package__ is None or __package__ == "":  # pragma: no cover - runtime setup
+    package_dir = Path(__file__).resolve().parent
+    project_root = package_dir.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
 from flask import Flask, request, jsonify, render_template
-import os
 
 from app.config import HOST, PORT, DATA_DIR, INDEX_PATH
-from .retriever import Retriever
-from .chat import ChatEngine
+from app.retriever import Retriever
+from app.chat import ChatEngine
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
@@ -28,9 +39,9 @@ def api_chat():
 @app.post('/api/reindex')
 def api_reindex():
     # Lazy import to avoid cost at import time
-    from .ingest import ingest
+    from app.ingest import ingest
     # Env gesteuert
-    from .config import CHUNK_SIZE, CHUNK_OVERLAP
+    from app.config import CHUNK_SIZE, CHUNK_OVERLAP
     n = ingest(DATA_DIR, INDEX_PATH, CHUNK_SIZE, CHUNK_OVERLAP)
     retriever.reload()
     return jsonify({"indexed_chunks": n})
